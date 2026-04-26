@@ -142,8 +142,6 @@ class MainApp
 		//	var sc = td.GetStaticConstructor()!;
 		//	StaticCtorResolver.RecoverDescriptorBase64(sc, verbose: true);
 		//}
-
-
 	}
 }
 
