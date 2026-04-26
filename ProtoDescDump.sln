@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36705.20 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProtoDescDump", "ProtoDescDump\ProtoDescDump.csproj", "{21B1DC43-6C77-43C9-AD88-405B3CE3668B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{21B1DC43-6C77-43C9-AD88-405B3CE3668B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{21B1DC43-6C77-43C9-AD88-405B3CE3668B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{21B1DC43-6C77-43C9-AD88-405B3CE3668B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{21B1DC43-6C77-43C9-AD88-405B3CE3668B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {6F7F084B-7128-4147-B47B-57E6A4CA28A7}
+	EndGlobalSection
+EndGlobal
