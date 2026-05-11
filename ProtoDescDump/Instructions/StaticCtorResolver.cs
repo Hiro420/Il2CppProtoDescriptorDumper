@@ -277,7 +277,7 @@ internal static class StaticCtorResolver
 					arrayReg = Register.RAX;
 					ulong synBase0 = 0x7FFF_0000_0000_0000UL + syntheticCounter++ * 0x1000UL;
 					emulator.ForceSetRegister(Register.RAX, synBase0);
-					emulator.WriteMemory(synBase0 + 24, (ulong)expectedArrayCount);
+					emulator.WriteMemory(synBase0 + 0x18, (ulong)expectedArrayCount, 4);
 					if (verbose)
 						Console.WriteLine($"[ArrayNew] Detected array allocation at 0x{instr.IP:X}, target=0x{target:X}, count={rdxVal.Value}");
 					goto endLoop;
@@ -293,7 +293,7 @@ internal static class StaticCtorResolver
 					var candidate = BuildConcatResult(arrayStore);
 					if (verbose)
 					{
-						Console.WriteLine($"[NewArrayAlloc] New array at 0x{instr.IP:X}, count={rdxVal.Value}. Previous had {arrayStore.Count} chunks, len={candidate.Length}");
+						Console.WriteLine($"[NewArrayAlloc] New array at 0x{instr.IP:X}, count={rdxVal.Value}. Previous had {arrayStoreCount} chunks, len={candidate.Length}");
 					}
 					if (LooksLikeDescriptorBase64(candidate))
 					{
@@ -310,7 +310,7 @@ internal static class StaticCtorResolver
 					emulator.ClearVolatileOnCall();
 					ulong synBaseN = 0x7FFF_0000_0000_0000UL + syntheticCounter++ * 0x1000UL;
 					emulator.ForceSetRegister(Register.RAX, synBaseN);
-					emulator.WriteMemory(synBaseN + 24, (ulong)expectedArrayCount);
+					emulator.WriteMemory(synBaseN + 0x18, (ulong)expectedArrayCount, 4);
 					if (verbose) Console.WriteLine("  -> Not valid descriptor, resetting for new array.");
 					goto endLoop;
 				}
@@ -378,7 +378,7 @@ internal static class StaticCtorResolver
 					if (verbose)
 					{
 						Console.WriteLine($"[Concat] String.Concat candidate at 0x{target:X}");
-						Console.WriteLine($"  Reconstructed {arrayStore.Count} chunks, total length = {candidate.Length}");
+						Console.WriteLine($"  Reconstructed {arrayStoreCount} chunks, total length = {candidate.Length}");
 					}
 
 					if (LooksLikeDescriptorBase64(candidate))
@@ -421,7 +421,27 @@ internal static class StaticCtorResolver
 						}
 						if (memChunks.Count > 0)
 						{
-							var candidate = string.Concat(memChunks.Values);
+							var mergedChunks = new SortedDictionary<int, string>(memChunks);
+
+							foreach (var kv in arrayStore)
+								mergedChunks[kv.Key] = kv.Value;
+
+							bool complete =
+								!firstArrayAllocSeen ||
+								expectedArrayCount <= 0 ||
+								(mergedChunks.Count >= expectedArrayCount &&
+								 Enumerable.Range(0, expectedArrayCount).All(mergedChunks.ContainsKey));
+
+							if (!complete)
+							{
+								if (verbose)
+									Console.WriteLine($"[MemArrayConcat] Skipping partial candidate: {mergedChunks.Count}/{expectedArrayCount} chunks");
+
+								continue;
+							}
+
+							var candidate = string.Concat(mergedChunks.Values);
+
 							if (LooksLikeDescriptorBase64(candidate))
 							{
 								result = candidate;
@@ -462,7 +482,7 @@ internal static class StaticCtorResolver
 		{
 			var candidate = BuildConcatResult(arrayStore);
 			if (verbose)
-				Console.WriteLine($"[EndFallback] Trying {arrayStore.Count} remaining chunks, total length = {candidate.Length}");
+				Console.WriteLine($"[EndFallback] Trying {arrayStoreCount} remaining chunks, total length = {candidate.Length}");
 			if (LooksLikeDescriptorBase64(candidate))
 				result = candidate;
 		}

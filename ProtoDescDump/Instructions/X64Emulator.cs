@@ -9,7 +9,7 @@ internal sealed class X64Emulator
 	private readonly IReadOnlyList<PEHeader.SectionTable> _sections;
 
 	private readonly Dictionary<Register, ulong?> _regs = new();
-	private readonly Dictionary<ulong, ulong> _syntheticMemory = new();
+	private readonly Dictionary<ulong, byte> _syntheticMemory = new();
 	private bool? _zf;
 	private bool? _sf;
 	private bool? _cf;
@@ -42,7 +42,11 @@ internal sealed class X64Emulator
 
 	public void ForceSetRegister(Register register, ulong value) => SetRegister(register, value);
 
-	public void WriteMemory(ulong address, ulong value) => _syntheticMemory[address] = value;
+	public void WriteMemory(ulong address, ulong value, int size = 8)
+	{
+		for (int i = 0; i < size; i++)
+			_syntheticMemory[address + (ulong)i] = (byte)(value >> (i * 8));
+	}
 
 	private void Clear(Register reg)
 	{
@@ -143,10 +147,8 @@ internal sealed class X64Emulator
 						var addr = EvaluateMemoryAddress(instruction);
 						if (addr.HasValue)
 						{
-							if (_syntheticMemory.TryGetValue(addr.Value, out var sv))
-								value = sv;
-							else
-								value = ReadFromModuleSize(addr.Value, instruction.MemorySize);
+							value = ReadSyntheticMemory(addr.Value, instruction.MemorySize)
+								?? ReadFromModuleSize(addr.Value, instruction.MemorySize);
 						}
 						break;
 					}
@@ -167,7 +169,14 @@ internal sealed class X64Emulator
 						 instruction.Op1Kind == OpKind.Immediate8to64 || instruction.Op1Kind == OpKind.Immediate32to64)
 					value = unchecked((ulong)instruction.Immediate64);
 				if (value.HasValue)
-					_syntheticMemory[addr.Value] = value.Value;
+					WriteMemory(addr.Value, value.Value, instruction.MemorySize switch
+					{
+						MemorySize.UInt8 or MemorySize.Int8 => 1,
+						MemorySize.UInt16 or MemorySize.Int16 => 2,
+						MemorySize.UInt32 or MemorySize.Int32 => 4,
+						MemorySize.UInt64 or MemorySize.Int64 => 8,
+						_ => 8
+					});
 			}
 		}
 	}
@@ -405,13 +414,13 @@ internal sealed class X64Emulator
 			case OpKind.Immediate8to32:
 			case OpKind.Immediate8to64:
 			case OpKind.Immediate32to64:
-				return unchecked((ulong)instruction.Immediate64);
+				return GetImmediate(instruction);
 			case OpKind.Memory:
 				{
 					var addr = EvaluateMemoryAddress(instruction);
 					if (!addr.HasValue) return null;
-					if (_syntheticMemory.TryGetValue(addr.Value, out var sv)) return sv;
-					return ReadFromModuleSize(addr.Value, instruction.MemorySize);
+					return ReadSyntheticMemory(addr.Value, instruction.MemorySize)
+						?? ReadFromModuleSize(addr.Value, instruction.MemorySize);
 				}
 			default: return null;
 		}
@@ -422,6 +431,7 @@ internal sealed class X64Emulator
 		var a = ReadOpValue(instruction, 0);
 		var b = ReadOpValue(instruction, 1);
 		if (!a.HasValue || !b.HasValue) { InvalidateFlags(); return; }
+
 		ulong r = unchecked(a.Value - b.Value);
 		_zf = r == 0;
 		_cf = a.Value < b.Value;
@@ -448,6 +458,49 @@ internal sealed class X64Emulator
 	{
 		if (taken == true && instruction.Op0Kind == OpKind.NearBranch64)
 			return instruction.NearBranchTarget;
+
 		return null;
+	}
+
+	private ulong? ReadSyntheticMemory(ulong address, MemorySize size)
+	{
+		int byteCount = size switch
+		{
+			MemorySize.UInt8 or MemorySize.Int8 => 1,
+			MemorySize.UInt16 or MemorySize.Int16 => 2,
+			MemorySize.UInt32 or MemorySize.Int32 => 4,
+			MemorySize.UInt64 or MemorySize.Int64 => 8,
+			_ => 8
+		};
+
+		ulong value = 0;
+
+		for (int i = 0; i < byteCount; i++)
+		{
+			if (!_syntheticMemory.TryGetValue(address + (ulong)i, out var b))
+				return null;
+
+			value |= (ulong)b << (i * 8);
+		}
+
+		return value;
+	}
+
+	private static ulong GetImmediate(Instruction instruction)
+	{
+		return instruction.Op1Kind switch
+		{
+			OpKind.Immediate8 => instruction.Immediate8,
+			OpKind.Immediate16 => instruction.Immediate16,
+			OpKind.Immediate32 => instruction.Immediate32,
+			OpKind.Immediate64 => instruction.Immediate64,
+
+			OpKind.Immediate8to16 => unchecked((ulong)(short)instruction.Immediate8to16),
+			OpKind.Immediate8to32 => unchecked((ulong)(int)instruction.Immediate8to32),
+			OpKind.Immediate8to64 => unchecked((ulong)instruction.Immediate8to64),
+			OpKind.Immediate32to64 => unchecked((ulong)instruction.Immediate32to64),
+
+			_ => unchecked((ulong)instruction.Immediate64)
+		};
 	}
 }
