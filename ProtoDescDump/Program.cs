@@ -18,7 +18,7 @@ class MainApp
 	public static Il2CppScript Il2CppScript = new Il2CppScript();
 	public static byte[] moduleBytes = [];
 	public static ulong baseAddress = 0x0;
-	public static uint InitUsagesRVA = 0x0;
+	public static ulong InitUsagesRVA = 0x0;
 
 	public static void Main(string[] args)
 	{
