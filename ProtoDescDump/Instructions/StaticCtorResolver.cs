@@ -366,8 +366,8 @@ internal static class StaticCtorResolver
 					}
 				}
 
-				if (firstArrayAllocSeen && arrayStoreCount > 0 &&
-					arrayStoreCount >= expectedArrayCount &&
+				if (firstArrayAllocSeen && arrayStore.Count > 0 &&
+					arrayStore.Count >= expectedArrayCount &&
 					expectedArrayCount > 0 &&
 					target != arrayStoreHelperVA &&
 					!arrayNewTargets.Contains(target) &&
@@ -378,7 +378,7 @@ internal static class StaticCtorResolver
 					if (verbose)
 					{
 						Console.WriteLine($"[Concat] String.Concat candidate at 0x{target:X}");
-						Console.WriteLine($"  Reconstructed {arrayStoreCount} chunks, total length = {candidate.Length}");
+						Console.WriteLine($"  Reconstructed {arrayStore.Count} unique chunks, total length = {candidate.Length}");
 					}
 
 					if (LooksLikeDescriptorBase64(candidate))

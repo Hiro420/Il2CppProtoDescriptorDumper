@@ -6,9 +6,9 @@ internal class UsagesFinder
 {
 	private const ulong ImageBase = 0x180000000;
 
-	private static uint VaToRva(ulong va)
+	private static ulong VaToRva(ulong va)
 	{
-		return checked((uint)(va - ImageBase));
+		return checked((ulong)(va - ImageBase));
 	}
 
 	private static bool IsConditionalJump(Mnemonic mnemonic)
@@ -34,7 +34,7 @@ internal class UsagesFinder
 			   );
 	}
 
-	public static uint FindInitCallRva(uint cctorRva)
+	public static ulong FindInitCallRva(uint cctorRva)
 	{
 		var addressData = new Il2cppFunctionAddressData(cctorRva);
 		Console.WriteLine($"[+] Scanning cctor at RVA: 0x{addressData.RVA:X}, Offset: 0x{addressData.Offset:X}");
@@ -71,7 +71,7 @@ internal class UsagesFinder
 				if (ins.Mnemonic == Mnemonic.Call)
 				{
 					ulong targetVa = ins.NearBranch64;
-					uint targetRva = VaToRva(targetVa);
+                    ulong targetRva = VaToRva(targetVa);
 
 					Console.WriteLine($"[+] Found init call at 0x{ins.IP:X} -> VA 0x{targetVa:X}, RVA 0x{targetRva:X}");
 					return targetRva;
