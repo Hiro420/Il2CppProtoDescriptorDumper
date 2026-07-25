@@ -32,15 +32,21 @@ public sealed class ProtoDumpService(
 
 			foreach (var buffer in set.file)
 			{
-				var packageParts = (buffer.package ?? string.Empty)
-					.Split('.', StringSplitOptions.RemoveEmptyEntries);
+				var relativeName = buffer.name.Replace('/', Path.DirectorySeparatorChar);
 
-				// dirty hack to remove double google.protobuf from the path
-				if (packageParts.Length >= 2 && packageParts[0] == "google" && packageParts[1] == "protobuf")
-					packageParts = packageParts[2..];
+				// dirty hack to get rid of the duplicate package name in the output path
+				string outputFile;
+				if (Path.GetDirectoryName(relativeName) is { Length: > 0 })
+				{
+					outputFile = Path.Combine(outputDir, relativeName);
+				}
+				else
+				{
+					var packageParts = (buffer.package ?? string.Empty)
+						.Split('.', StringSplitOptions.RemoveEmptyEntries);
 
-				var outDir = Path.Combine([outputDir, .. packageParts]);
-				var outputFile = Path.Combine(outDir, buffer.name);
+					outputFile = Path.Combine([outputDir, .. packageParts, relativeName]);
+				}
 
 				fileSystem.EnsureDirectory(Path.GetDirectoryName(outputFile)!);
 				var protoText = formatter.FormatFile(buffer);

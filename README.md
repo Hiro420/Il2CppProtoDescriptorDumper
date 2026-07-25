@@ -14,6 +14,7 @@ Usage
   * `Dll` \(there go the DummyDll\) \
     (from [Il2CppInspectorRedux](https://github.com/LukeFZ/Il2CppInspectorRedux) output)
 * Run the program
+  * You can also add `--output-descriptors` to make the tool spit out raw descriptors
   * If everything works, Protobuf descriptors will be recovered automatically
 
 ---

@@ -13,12 +13,14 @@ class MainApp
 	const string dummyDllDir = "Dll";
 	const string scriptName = "il2cpp.json";
 	const string gaName = "GameAssembly.dll";
+	const string descOutDir = "descriptors";
 	public static List<AssemblyDefinition> assemblyDefs = new();
 	public static List<PEHeader.SectionTable> sectionTables = [];
 	public static Il2CppScript Il2CppScript = new Il2CppScript();
 	public static byte[] moduleBytes = [];
 	public static ulong baseAddress = 0x0;
 	public static ulong InitUsagesRVA = 0x0;
+	private static bool OutputDescriptors = false;
 
 	public static void Main(string[] args)
 	{
@@ -29,6 +31,8 @@ class MainApp
 			Console.WriteLine($"Error: {dllPath2} not found.");
 			return;
 		}
+
+		OutputDescriptors = args.Any(i => i.Equals("--output-descriptors", StringComparison.InvariantCultureIgnoreCase));
 
 		Console.WriteLine($"Loading assemblies from: {allDllPath}");
 
@@ -77,6 +81,9 @@ class MainApp
 
 		IEnumerable<TypeDefinition> allTypes = assemblyDefs.SelectMany(a => a.MainModule.GetAllTypes());
 
+		if (OutputDescriptors)
+			Directory.CreateDirectory(descOutDir);
+
 		foreach (TypeDefinition typeDef in allTypes)
 		{
 			if (!typeDef.Name.EndsWith("Reflection"))
@@ -104,6 +111,10 @@ class MainApp
 			try
 			{
 				var bytes = Convert.FromBase64String(base64);
+
+				if (OutputDescriptors)
+					File.WriteAllBytes(Path.Combine(descOutDir, $"{typeDef.FullName}.pb"), bytes);
+
 				var ms = new MemoryStream(bytes);
 				var single = Serializer.Deserialize<FileDescriptorProto>(ms);
 				set.file.Add(single);

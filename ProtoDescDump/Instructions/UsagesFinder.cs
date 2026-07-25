@@ -71,7 +71,7 @@ internal class UsagesFinder
 				if (ins.Mnemonic == Mnemonic.Call)
 				{
 					ulong targetVa = ins.NearBranch64;
-                    ulong targetRva = VaToRva(targetVa);
+					ulong targetRva = VaToRva(targetVa);
 
 					Console.WriteLine($"[+] Found init call at 0x{ins.IP:X} -> VA 0x{targetVa:X}, RVA 0x{targetRva:X}");
 					return targetRva;
