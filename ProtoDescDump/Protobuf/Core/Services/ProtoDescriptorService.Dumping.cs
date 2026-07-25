@@ -268,7 +268,7 @@ public sealed partial class ProtoDescriptorService
 		var relativeType = absoluteType[1..];
 		var separator = relativeType.IndexOf('.');
 		var firstSegment = separator < 0 ? relativeType : relativeType[..separator];
-		var scopes = messageNameStack.Reverse().SkipLast(1); // exclude the field currently being emitted
+		var scopes = messageNameStack.Reverse().SkipLast(1);
 		var scope = string.Join(".", scopes);
 
 		while (!string.IsNullOrEmpty(scope))
@@ -291,37 +291,6 @@ public sealed partial class ProtoDescriptorService
 		}
 
 		return true;
-	}
-
-	bool TryGetRepeatedCustomOptionValues(
-		FieldDescriptorProto field,
-		IExtensible options,
-		out List<string> values)
-	{
-		values = new List<string>();
-
-		if (field.label != FieldDescriptorProto.Label.LABEL_REPEATED)
-			return false;
-
-		if (IsNamedType(field.type) && !string.IsNullOrEmpty(field.type_name))
-		{
-			if (!protobufTypeMap.TryGetValue(field.type_name, out var typeNode) ||
-				typeNode.Source is not EnumDescriptorProto enumProto)
-			{
-				return false;
-			}
-
-			foreach (var index in ExtractRepeatedEnumValues(options, field.number))
-			{
-				var enumValue = enumProto.value.Find(x => x.number == index);
-				values.Add(enumValue?.name ?? index.ToString());
-			}
-
-			return values.Count > 0;
-		}
-
-		values.AddRange(ExtractRepeatedScalarValues(options, field));
-		return values.Count > 0;
 	}
 
 	bool TryFormatCustomOptionValue(FieldDescriptorProto field, IExtensible options, out string? value)
@@ -376,17 +345,7 @@ public sealed partial class ProtoDescriptorService
 				var fields = new List<string>();
 				foreach (var subField in messageProto.field)
 				{
-					// Aggregate option values use protobuf TextFormat-like syntax, but
-					// protoc/IDE .proto parsers do not consistently accept list literals
-					// (for example: not_in: [0]). The portable representation for a
-					// repeated field is to emit the field once per value:
-					//     not_in: 0 not_in: 1
-					if (TryGetRepeatedCustomOptionValues(subField, extension, out var repeatedValues))
-					{
-						foreach (var repeatedValue in repeatedValues)
-							fields.Add($"{subField.name}: {repeatedValue}");
-					}
-					else if (TryFormatCustomOptionValue(subField, extension, out var subValue))
+					if (TryFormatCustomOptionValue(subField, extension, out var subValue))
 					{
 						fields.Add($"{subField.name}: {subValue}");
 					}
