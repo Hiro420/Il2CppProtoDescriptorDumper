@@ -21,6 +21,7 @@ class MainApp
 	public static ulong baseAddress = 0x0;
 	public static ulong InitUsagesRVA = 0x0;
 	private static bool OutputDescriptors = false;
+	private static bool SkipDependencies = false;
 
 	public static void Main(string[] args)
 	{
@@ -33,6 +34,7 @@ class MainApp
 		}
 
 		OutputDescriptors = args.Any(i => i.Equals("--output-descriptors", StringComparison.InvariantCultureIgnoreCase));
+		SkipDependencies = args.Any(i => i.Equals("--no-dependencies", StringComparison.InvariantCultureIgnoreCase));
 
 		Console.WriteLine($"Loading assemblies from: {allDllPath}");
 
@@ -132,7 +134,7 @@ class MainApp
 
 		var logger = new ConsoleLogger();
 		var fileSystem = new LocalFileSystem();
-		var coreService = new ProtoDescriptorService([], logger);
+		var coreService = new ProtoDescriptorService([], logger, SkipDependencies);
 		var app = new ProtoDumpService(fileSystem, logger, coreService, coreService);
 		using (MemoryStream stream = new MemoryStream())
 		{

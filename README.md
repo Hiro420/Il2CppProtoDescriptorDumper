@@ -15,6 +15,7 @@ Usage
     (from [Il2CppInspectorRedux](https://github.com/LukeFZ/Il2CppInspectorRedux) output)
 * Run the program
   * You can also add `--output-descriptors` to make the tool spit out raw descriptors
+  * And you can also add `--no-dependencies` to make the tool skip dependencies check
   * If everything works, Protobuf descriptors will be recovered automatically
 
 ---
