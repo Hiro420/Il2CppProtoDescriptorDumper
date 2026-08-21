@@ -6,7 +6,10 @@ namespace ProtoDescDump;
 internal static class StaticCtorResolver
 {
 	private const int MaxTrackedArrayElements = short.MaxValue + 1;
-	private const ulong SyntheticHeapStart = 0x7FFFUL << 48; // x86-64 Virtual Memory Boundary
+
+	// x86-64 Virtual Memory Boundary
+	private const ulong SyntheticHeapStart = 0x7FFFUL << 48;
+	private const ulong SyntheticStringStart = 0x7FFEUL << 48;
 
 	public static string? RecoverDescriptorBase64(MethodDefinition staticCtor, bool verbose = true)
 	{
@@ -19,8 +22,7 @@ internal static class StaticCtorResolver
 			return null;
 		}
 
-		var address = new Il2cppFunctionAddressData(rva);
-		var instructions = InstructionParser.GetInstructions(address, false);
+		var instructions = InstructionParser.GetInstructions(new Il2cppFunctionAddressData(rva), false);
 		if (instructions.Count == 0)
 		{
 			Console.WriteLine("No native instructions decoded for static constructor.");
@@ -28,482 +30,231 @@ internal static class StaticCtorResolver
 		}
 
 		var emulator = new X64Emulator(MainApp.moduleBytes, MainApp.baseAddress, MainApp.sectionTables);
-		var stringLiterals = MainApp.Il2CppScript.addressMap.stringLiterals;
 
-		var stringBySlotVa = new Dictionary<ulong, string>();
-		foreach (var lit in stringLiterals)
+		var stringByValue = new Dictionary<ulong, string>();
+		ulong nextSyntheticString = SyntheticStringStart;
+		foreach (var lit in MainApp.Il2CppScript.addressMap.stringLiterals)
 		{
-			stringBySlotVa[lit.VA] = lit.s_string;
-		}
-
-		var regString = new Dictionary<Register, string>();
-
-		var arrayStore = new SortedDictionary<int, string>();
-
-		Register? arrayReg = null;
-
-		ulong? arrayStoreHelperVA = null;
-		ulong? interleavedHelperVA = null;
-		int nextSecondaryStoreIndex = 0;
-		ulong? stringConcatVA = null;
-		ulong? arrayNewVA = null;
-		var arrayNewTargets = new HashSet<ulong>();
-
-		var memString = new Dictionary<ulong, string>();
-		ulong nextSyntheticArrayBase = SyntheticHeapStart;
-		ulong? activeArrayBase = null;
-		ulong? secondaryStoreHelperVA = null;
-
-		var callTargets = new HashSet<ulong>();
-		foreach (var instr in instructions)
-		{
-			if (instr.Mnemonic == Mnemonic.Call && instr.Op0Kind == OpKind.NearBranch64)
+			ulong value;
+			var raw = emulator.ReadMemory(lit.VA, 8);
+			if (raw.HasValue && raw.Value != 0)
 			{
-				callTargets.Add(instr.NearBranchTarget);
+				value = raw.Value;
 			}
+			else
+			{
+				value = AllocateSyntheticString(ref nextSyntheticString);
+				emulator.WriteMemory(lit.VA, value, 8);
+			}
+
+			stringByValue.TryAdd(value, lit.s_string);
 		}
 
 		var instrByIP = new Dictionary<ulong, int>();
 		for (int idx = 0; idx < instructions.Count; idx++)
 			instrByIP[instructions[idx].IP] = idx;
 
-		int arrayStoreCount = 0;
+		var arrayNewTargets = new HashSet<ulong>();
+		var stringConcatTargets = new HashSet<ulong>();
+		var stelemRefHelperCache = new Dictionary<ulong, bool>();
+
+		ulong? arrayStoreHelperVA = null;
+		ulong? activeArrayBase = null;
+		ulong nextSyntheticArrayBase = SyntheticHeapStart;
 		int expectedArrayCount = 0;
 		bool firstArrayAllocSeen = false;
 		string? result = null;
 
 		var visitCount = new Dictionary<ulong, int>();
 		const int MaxVisitsPerIP = 10_000;
+
 		for (int i = 0; i < instructions.Count;)
 		{
 			var instr = instructions[i];
-			var visits = visitCount.GetValueOrDefault(instr.IP, 0);
-			if (visits >= MaxVisitsPerIP) { i++; continue; }
+			int visits = visitCount.GetValueOrDefault(instr.IP, 0);
+			if (visits >= MaxVisitsPerIP)
+			{
+				i++;
+				continue;
+			}
 			visitCount[instr.IP] = visits + 1;
 
-			ulong? preMovSrcAddr = null;
-			if (instr.Mnemonic == Mnemonic.Mov &&
-				instr.Op0Kind == OpKind.Register &&
-				instr.Op1Kind == OpKind.Memory)
-			{
-				preMovSrcAddr = instr.IsIPRelativeMemoryOperand
-					? instr.IPRelativeMemoryAddress
-					: emulator.EvaluateMemoryAddress(instr);
-			}
-
-			var jumpTarget = emulator.Step(instr);
-
-			switch (instr.Mnemonic)
-			{
-				case Mnemonic.Lea:
-					if (instr.Op0Kind == OpKind.Register && instr.Op1Kind == OpKind.Memory)
-					{
-						var dst = Canon(instr.Op0Register);
-						var addr = emulator.GetRegister(dst);
-						if (addr.HasValue && stringBySlotVa.TryGetValue(addr.Value, out var s))
-						{
-							regString[dst] = s;
-						}
-						else
-						{
-							regString.Remove(dst);
-						}
-					}
-					break;
-
-				case Mnemonic.Mov:
-					if (instr.Op0Kind == OpKind.Register)
-					{
-						var dst = Canon(instr.Op0Register);
-
-						if (instr.Op1Kind == OpKind.Register)
-						{
-							var src = Canon(instr.Op1Register);
-							if (regString.TryGetValue(src, out var sv))
-								regString[dst] = sv;
-							else
-								regString.Remove(dst);
-
-							if (arrayReg.HasValue && src == arrayReg.Value)
-								arrayReg = dst;
-						}
-						else if (instr.Op1Kind == OpKind.Memory)
-						{
-							if (preMovSrcAddr.HasValue && stringBySlotVa.TryGetValue(preMovSrcAddr.Value, out var ms))
-							{
-								regString[dst] = ms;
-							}
-							else
-							{
-								var regVal = emulator.GetRegister(dst);
-								if (regVal.HasValue && stringBySlotVa.TryGetValue(regVal.Value, out var ms2))
-									regString[dst] = ms2;
-								else
-									regString.Remove(dst);
-							}
-						}
-						else if (instr.Op1Kind >= OpKind.Immediate8 && instr.Op1Kind <= OpKind.Immediate64)
-						{
-							var imm = unchecked((ulong)instr.Immediate64);
-							if (stringBySlotVa.TryGetValue(imm, out var si))
-								regString[dst] = si;
-							else
-								regString.Remove(dst);
-						}
-						else
-						{
-							regString.Remove(dst);
-						}
-					}
-					else if (instr.Op0Kind == OpKind.Memory && instr.Op1Kind == OpKind.Register)
-					{
-						var writeAddr = emulator.EvaluateMemoryAddress(instr);
-						if (writeAddr.HasValue)
-						{
-							var src = Canon(instr.Op1Register);
-							if (regString.TryGetValue(src, out var strFromReg))
-								memString[writeAddr.Value] = strFromReg;
-							else
-							{
-								var srcVal = emulator.GetRegister(src);
-								if (srcVal.HasValue && stringBySlotVa.TryGetValue(srcVal.Value, out var strFromVal))
-									memString[writeAddr.Value] = strFromVal;
-							}
-						}
-					}
-					break;
-
-				case Mnemonic.Xor:
-					if (instr.Op0Kind == OpKind.Register && instr.Op1Kind == OpKind.Register
-						&& instr.Op0Register == instr.Op1Register)
-					{
-						regString.Remove(Canon(instr.Op0Register));
-					}
-					break;
-
-				case Mnemonic.Add:
-				case Mnemonic.Sub:
-				case Mnemonic.Inc:
-				case Mnemonic.Dec:
-				case Mnemonic.And:
-				case Mnemonic.Or:
-				case Mnemonic.Shl:
-				case Mnemonic.Shr:
-				case Mnemonic.Sar:
-				case Mnemonic.Neg:
-				case Mnemonic.Not:
-				case Mnemonic.Imul:
-					if (instr.Op0Kind == OpKind.Register)
-						regString.Remove(Canon(instr.Op0Register));
-					break;
-			}
+			ulong? jumpTarget = emulator.Step(instr);
 
 			if (instr.Mnemonic == Mnemonic.Call && instr.Op0Kind == OpKind.NearBranch64)
 			{
 				ulong target = instr.NearBranchTarget;
+				ulong? rcx = emulator.GetRegister(Register.RCX);
+				ulong? rdx = emulator.GetRegister(Register.RDX);
+				ulong? r8 = emulator.GetRegister(Register.R8);
+				ulong? r9 = emulator.GetRegister(Register.R9);
 
-				if (target == MainApp.InitUsagesRVA)
-				{
-					ClearVolatileStrings(regString);
-					emulator.ClearVolatileOnCall();
-					goto endLoop;
-				}
-
-				var rcxVal = emulator.GetRegister(Register.RCX);
-				var rdxVal = emulator.GetRegister(Register.RDX);
-				var r8Val = emulator.GetRegister(Register.R8);
-				var r9Val = emulator.GetRegister(Register.R9);
-
-				regString.TryGetValue(Register.RCX, out var rcxStr);
-				regString.TryGetValue(Register.RDX, out var rdxStr);
-				regString.TryGetValue(Register.R8, out var r8Str);
-				regString.TryGetValue(Register.R9, out var r9Str);
+				string? rcxString = ResolveString(rcx, stringByValue);
+				string? rdxString = ResolveString(rdx, stringByValue);
+				string? r8String = ResolveString(r8, stringByValue);
+				string? r9String = ResolveString(r9, stringByValue);
 
 				if (verbose)
 				{
-					Console.Write($"  CALL 0x{target:X} | RCX={rcxVal?.ToString("X") ?? "?"} RDX={rdxVal?.ToString("X") ?? "?"} R8={r8Val?.ToString("X") ?? "?"}");
-					if (rcxStr != null) Console.Write($" rcxS=\"{rcxStr.Substring(0, Math.Min(20, rcxStr.Length))}\"");
-					if (rdxStr != null) Console.Write($" rdxS=\"{rdxStr.Substring(0, Math.Min(20, rdxStr.Length))}\"");
-					if (r8Str != null) Console.Write($" r8S=\"{r8Str.Substring(0, Math.Min(20, r8Str.Length))}\"");
-					if (r9Str != null) Console.Write($" r9S=\"{r9Str.Substring(0, Math.Min(20, r9Str.Length))}\"");
+					Console.Write($"  CALL 0x{target:X} | RCX={FormatValue(rcx)} RDX={FormatValue(rdx)} R8={FormatValue(r8)}");
+					PrintStringArg("rcxS", rcxString);
+					PrintStringArg("rdxS", rdxString);
+					PrintStringArg("r8S", r8String);
+					PrintStringArg("r9S", r9String);
 					Console.WriteLine();
 				}
 
-				if (result == null && rcxStr != null && rdxStr != null)
+				if (target == MainApp.InitUsagesRVA)
 				{
-					string candidate;
-					int argCount;
-					if (r8Str != null && r9Str != null)
-					{
-						candidate = rcxStr + rdxStr + r8Str + r9Str;
-						argCount = 4;
-					}
-					else if (r8Str != null)
-					{
-						candidate = rcxStr + rdxStr + r8Str;
-						argCount = 3;
-					}
-					else
-					{
-						candidate = rcxStr + rdxStr;
-						argCount = 2;
-					}
-					if (LooksLikeDescriptorBase64(candidate))
-					{
-						result = candidate;
-						stringConcatVA = target;
-						if (verbose)
-							Console.WriteLine($"[DirectConcat] String.Concat({argCount} args) at 0x{target:X}, length={result.Length}");
-						regString[Register.RAX] = result;
-						ClearVolatileStrings(regString, exceptRax: true);
-						emulator.ClearVolatileOnCall();
-						goto endLoop;
-					}
-					else
-					{
-						regString[Register.RAX] = candidate;
-						ClearVolatileStrings(regString, exceptRax: true);
-						emulator.ClearVolatileOnCall();
-						goto endLoop;
-					}
-				}
-
-				if (!firstArrayAllocSeen && rdxVal.HasValue && rdxVal.Value >= 1 && rdxVal.Value <= MaxTrackedArrayElements
-					&& r8Str == null
-					&& target != arrayStoreHelperVA
-					&& !arrayNewTargets.Contains(target))
-				{
-					arrayNewVA = target;
-					arrayNewTargets.Add(target);
-					expectedArrayCount = (int)rdxVal.Value;
-					firstArrayAllocSeen = true;
-					ClearVolatileStrings(regString);
 					emulator.ClearVolatileOnCall();
-					arrayStore.Clear();
-					arrayStoreCount = 0;
-					nextSecondaryStoreIndex = 0;
-					secondaryStoreHelperVA = null;
-					arrayReg = Register.RAX;
-					activeArrayBase = AllocateSyntheticArray(ref nextSyntheticArrayBase, expectedArrayCount);
-					emulator.ForceSetRegister(Register.RAX, activeArrayBase.Value);
-					emulator.WriteMemory(activeArrayBase.Value + 0x18, (ulong)expectedArrayCount, 4);
-					if (verbose)
-						Console.WriteLine($"[ArrayNew] Detected array allocation at 0x{instr.IP:X}, target=0x{target:X}, count={rdxVal.Value}");
 					goto endLoop;
 				}
 
-				if (verbose && !firstArrayAllocSeen && rdxVal.HasValue && rdxVal.Value >= 1 && rdxVal.Value <= MaxTrackedArrayElements)
-					Console.WriteLine($"  [ArrayNewCandidate] at 0x{instr.IP:X} target=0x{target:X} count={rdxVal.Value}");
-
-				if (firstArrayAllocSeen
-					&& arrayNewTargets.Contains(target)
-					&& rdxVal.HasValue && rdxVal.Value >= 1 && rdxVal.Value <= MaxTrackedArrayElements)
+				if (arrayNewTargets.Contains(target) && IsPlausibleArrayLength(rdx))
 				{
-					bool hadCompleteCandidate = TryBuildExactConcat(arrayStore, expectedArrayCount, out var candidate);
-					if (verbose)
+					if (TryFinishArray(emulator, activeArrayBase, expectedArrayCount, stringByValue,
+						out var previousCandidate, out int previousResolved) &&
+						LooksLikeDescriptorBase64(previousCandidate))
 					{
-						Console.WriteLine($"[NewArrayAlloc] New array at 0x{instr.IP:X}, count={rdxVal.Value}. Previous had {arrayStore.Count}/{expectedArrayCount} chunks, len={candidate.Length}");
-					}
-					if (hadCompleteCandidate && LooksLikeDescriptorBase64(candidate))
-					{
-						result = candidate;
-						if (verbose) Console.WriteLine($"  -> Valid descriptor! length={result.Length}");
+						result = previousCandidate;
+						if (verbose)
+							Console.WriteLine($"[NewArrayAlloc] Previous emulated array is a valid descriptor, length={result.Length}");
 						break;
 					}
 
-					arrayStore.Clear();
-					arrayStoreCount = 0;
-					nextSecondaryStoreIndex = 0;
-					secondaryStoreHelperVA = null;
-					expectedArrayCount = (int)rdxVal.Value;
-					arrayReg = Register.RAX;
-					interleavedHelperVA = null;
-					ClearVolatileStrings(regString);
+					if (verbose && activeArrayBase.HasValue && expectedArrayCount > 0)
+						Console.WriteLine($"[NewArrayAlloc] Replacing previous array ({previousResolved}/{expectedArrayCount} resolved elements).");
+
+					expectedArrayCount = checked((int)rdx!.Value);
+					activeArrayBase = AllocateArray(emulator, ref nextSyntheticArrayBase, expectedArrayCount, rcx);
 					emulator.ClearVolatileOnCall();
-					activeArrayBase = AllocateSyntheticArray(ref nextSyntheticArrayBase, expectedArrayCount);
 					emulator.ForceSetRegister(Register.RAX, activeArrayBase.Value);
-					emulator.WriteMemory(activeArrayBase.Value + 0x18, (ulong)expectedArrayCount, 4);
-					if (verbose) Console.WriteLine("  -> Previous array was incomplete or invalid; tracking the new array.");
+					if (verbose)
+						Console.WriteLine($"[ArrayNew] target=0x{target:X}, count={expectedArrayCount}, object=0x{activeArrayBase.Value:X}");
 					goto endLoop;
 				}
 
-				if (firstArrayAllocSeen && activeArrayBase.HasValue
-					&& rcxVal == activeArrayBase.Value && r8Str != null)
+				if (!firstArrayAllocSeen && IsPlausibleArrayLength(rdx) && r8String == null)
 				{
-					int index = rdxVal.HasValue ? (int)rdxVal.Value : -1;
-					if (index >= 0 && index < expectedArrayCount)
+					arrayNewTargets.Add(target);
+					firstArrayAllocSeen = true;
+					expectedArrayCount = checked((int)rdx!.Value);
+					activeArrayBase = AllocateArray(emulator, ref nextSyntheticArrayBase, expectedArrayCount, rcx);
+					emulator.ClearVolatileOnCall();
+					emulator.ForceSetRegister(Register.RAX, activeArrayBase.Value);
+					if (verbose)
+						Console.WriteLine($"[ArrayNew] Detected array allocation at 0x{instr.IP:X}, target=0x{target:X}, count={expectedArrayCount}, object=0x{activeArrayBase.Value:X}");
+					goto endLoop;
+				}
+
+				if (firstArrayAllocSeen && activeArrayBase.HasValue && rcx == activeArrayBase.Value &&
+					rdx.HasValue && rdx.Value < (ulong)expectedArrayCount)
+				{
+					if (arrayStoreHelperVA == null)
 					{
-						if (arrayStoreHelperVA == null)
+						if (!stelemRefHelperCache.TryGetValue(target, out bool isStelemRef))
+						{
+							isStelemRef = IsReferenceArrayStoreHelper(target);
+							stelemRefHelperCache[target] = isStelemRef;
+						}
+
+						if (isStelemRef)
 						{
 							arrayStoreHelperVA = target;
 							if (verbose)
-								Console.WriteLine($"[ArrayStore] Detected store helper at 0x{target:X}");
-						}
-
-						if (target == arrayStoreHelperVA)
-						{
-							arrayStore[index] = r8Str;
-							arrayStoreCount = arrayStore.Count;
-							nextSecondaryStoreIndex = Math.Max(nextSecondaryStoreIndex, index + 1);
-							if (verbose)
-								Console.WriteLine($"  [{index}] = \"{r8Str.Substring(0, Math.Min(40, r8Str.Length))}...\"");
+								Console.WriteLine($"[ArrayStore] Recognized stelem.ref helper at 0x{target:X}");
 						}
 					}
-				}
 
-				if (firstArrayAllocSeen && activeArrayBase.HasValue && arrayStoreCount > 0
-					&& rcxVal == activeArrayBase.Value
-					&& rdxStr != null && r8Str == null
-					&& target != arrayStoreHelperVA
-					&& target != interleavedHelperVA
-					&& !arrayNewTargets.Contains(target)
-					&& nextSecondaryStoreIndex < expectedArrayCount
-					&& LooksLikeBase64(rdxStr))
-				{
-					secondaryStoreHelperVA ??= target;
-					if (target == secondaryStoreHelperVA)
+					if (target == arrayStoreHelperVA)
 					{
-						arrayStore[nextSecondaryStoreIndex] = rdxStr;
-						arrayStoreCount = arrayStore.Count;
-						if (verbose)
-							Console.WriteLine($"[SecondaryStore] at 0x{target:X}, [{nextSecondaryStoreIndex}] = \"{rdxStr.Substring(0, Math.Min(40, rdxStr.Length))}...\"");
-						nextSecondaryStoreIndex++;
-					}
-				}
+						ulong value = r8 ?? 0;
+						ulong elementAddress = activeArrayBase.Value + 0x20UL + rdx.Value * 8UL;
+						emulator.WriteMemory(elementAddress, value, 8);
 
-				if (firstArrayAllocSeen && arrayStoreCount > 0
-					&& target != arrayStoreHelperVA
-					&& !arrayNewTargets.Contains(target)
-					&& r8Str == null && rdxStr == null && rcxStr == null)
-				{
-					if (interleavedHelperVA == null)
-					{
-						interleavedHelperVA = target;
-						if (verbose)
-							Console.WriteLine($"[InterleavedHelper] Detected helper at 0x{target:X}");
-					}
-				}
+						if (verbose && ResolveString(r8, stringByValue) is { } stored)
+							Console.WriteLine($"  [{rdx.Value}] = \"{Preview(stored)}\"");
 
-				if (firstArrayAllocSeen && arrayStore.Count > 0 &&
-					arrayStore.Count == expectedArrayCount &&
-					expectedArrayCount > 0 &&
-					target != arrayStoreHelperVA &&
-					!arrayNewTargets.Contains(target) &&
-					target != interleavedHelperVA &&
-					stringConcatVA == null)
-				{
-					TryBuildExactConcat(arrayStore, expectedArrayCount, out var candidate);
-					if (verbose)
-					{
-						Console.WriteLine($"[Concat] String.Concat candidate at 0x{target:X}");
-						Console.WriteLine($"  Reconstructed {arrayStore.Count} unique chunks, total length = {candidate.Length}");
-					}
-
-					if (LooksLikeDescriptorBase64(candidate))
-					{
-						stringConcatVA = target;
-						result = candidate;
-
-						regString[Register.RAX] = result;
 						emulator.ClearVolatileOnCall();
-						ClearVolatileStrings(regString, exceptRax: true);
 						goto endLoop;
 					}
-					else
+				}
+
+				bool passesActiveArray = activeArrayBase.HasValue &&
+					(rcx == activeArrayBase.Value || rdx == activeArrayBase.Value ||
+					 r8 == activeArrayBase.Value || r9 == activeArrayBase.Value);
+
+				if (firstArrayAllocSeen && activeArrayBase.HasValue && expectedArrayCount > 0 &&
+					passesActiveArray && target != arrayStoreHelperVA && !arrayNewTargets.Contains(target) &&
+					TryFinishArray(emulator, activeArrayBase, expectedArrayCount, stringByValue,
+						out var arrayCandidate, out int resolvedCount))
+				{
+					if (stringConcatTargets.Contains(target) || LooksLikeBase64(arrayCandidate))
 					{
+						stringConcatTargets.Add(target);
+						ulong returnValue = RegisterSyntheticString(arrayCandidate, stringByValue, ref nextSyntheticString);
+						emulator.ClearVolatileOnCall();
+						emulator.ForceSetRegister(Register.RAX, returnValue);
+
 						if (verbose)
-							Console.WriteLine("  Candidate is not valid descriptor base64, resetting state...");
-						firstArrayAllocSeen = false;
-						arrayNewVA = null;
-						stringConcatVA = null;
-						arrayStore.Clear();
-						arrayStoreCount = 0;
-						expectedArrayCount = 0;
-						arrayReg = null;
-						interleavedHelperVA = null;
+							Console.WriteLine($"[Concat] string[] at 0x{target:X}: {resolvedCount}/{expectedArrayCount} emulated elements, length={arrayCandidate.Length}");
+
+						if (LooksLikeDescriptorBase64(arrayCandidate))
+						{
+							result = arrayCandidate;
+							goto endLoop;
+						}
+
+						goto endLoop;
 					}
 				}
 
-				if (result == null)
+				if (TryBuildStringArguments(rcxString, rdxString, r8String, r9String,
+					out var directCandidate, out int directArgCount) &&
+					(stringConcatTargets.Contains(target) || LooksLikeBase64(directCandidate)))
 				{
-					foreach (var checkVal in new[] { rcxVal, rdxVal, r8Val }.OfType<ulong>())
-					{
-						if (!activeArrayBase.HasValue || checkVal != activeArrayBase.Value || expectedArrayCount <= 0)
-							continue;
-
-						var memChunks = new SortedDictionary<int, string>();
-						for (int slot = 0; slot < expectedArrayCount; slot++)
-						{
-							ulong elemAddr = checkVal + 32UL + (ulong)(slot * 8);
-							if (memString.TryGetValue(elemAddr, out var s))
-								memChunks[slot] = s;
-							else
-								break;
-						}
-						if (memChunks.Count > 0)
-						{
-							var mergedChunks = new SortedDictionary<int, string>(memChunks);
-
-							foreach (var kv in arrayStore)
-								mergedChunks[kv.Key] = kv.Value;
-
-							if (!TryBuildExactConcat(mergedChunks, expectedArrayCount, out var candidate))
-							{
-								if (verbose)
-									Console.WriteLine($"[MemArrayConcat] Skipping partial candidate: {mergedChunks.Count}/{expectedArrayCount} chunks");
-
-								continue;
-							}
-
-							if (LooksLikeDescriptorBase64(candidate))
-							{
-								result = candidate;
-								stringConcatVA = target;
-								if (verbose) Console.WriteLine($"[MemArrayConcat] {memChunks.Count} inline chunks at 0x{target:X}, length={result.Length}");
-								regString[Register.RAX] = result;
-								ClearVolatileStrings(regString, exceptRax: true);
-								emulator.ClearVolatileOnCall();
-								goto endLoop;
-							}
-						}
-					}
-				}
-
-				if (rcxStr != null && rdxStr == null && r8Str == null && r9Str == null)
-					regString[Register.RAX] = rcxStr;
-
-				else if (result == null && rcxStr == null && rdxStr != null && r8Str == null && r9Str == null)
-				{
-					regString[Register.RAX] = rdxStr;
-					ClearVolatileStrings(regString, exceptRax: true);
+					stringConcatTargets.Add(target);
+					ulong returnValue = RegisterSyntheticString(directCandidate, stringByValue, ref nextSyntheticString);
 					emulator.ClearVolatileOnCall();
+					emulator.ForceSetRegister(Register.RAX, returnValue);
+
+					if (verbose)
+						Console.WriteLine($"[DirectConcat] {directArgCount} string args at 0x{target:X}, length={directCandidate.Length}");
+
+					if (LooksLikeDescriptorBase64(directCandidate))
+						result = directCandidate;
+
 					goto endLoop;
 				}
 
-				ClearVolatileStrings(regString, exceptRax: rcxStr != null && rdxStr == null && r8Str == null && r9Str == null);
 				emulator.ClearVolatileOnCall();
 			}
 
 		endLoop:
+			if (result != null)
+				break;
+
 			if (jumpTarget.HasValue && instrByIP.TryGetValue(jumpTarget.Value, out int jumpIdx))
 				i = jumpIdx;
 			else
 				i++;
 		}
 
-		if (result == null && arrayStoreCount > 0
-			&& TryBuildExactConcat(arrayStore, expectedArrayCount, out var fallbackCandidate))
+		if (result == null &&
+			TryFinishArray(emulator, activeArrayBase, expectedArrayCount, stringByValue,
+				out var fallbackCandidate, out int fallbackResolved) &&
+			LooksLikeDescriptorBase64(fallbackCandidate))
 		{
 			if (verbose)
-				Console.WriteLine($"[EndFallback] Trying {arrayStore.Count}/{expectedArrayCount} chunks, total length = {fallbackCandidate.Length}");
-			if (LooksLikeDescriptorBase64(fallbackCandidate))
-				result = fallbackCandidate;
+				Console.WriteLine($"[EndFallback] Emulated array memory {fallbackResolved}/{expectedArrayCount}, length={fallbackCandidate.Length}");
+			result = fallbackCandidate;
 		}
 
 		if (result == null)
 		{
+			int resolved = CountResolvedArrayElements(emulator, activeArrayBase, expectedArrayCount, stringByValue);
 			Console.WriteLine("Failed to locate descriptor base64 in static constructor.");
-			Console.WriteLine($"  Array stores found: {arrayStoreCount}");
+			Console.WriteLine($"  Emulated array elements resolved: {resolved}/{expectedArrayCount}");
 			Console.WriteLine($"  Array store helper VA: {(arrayStoreHelperVA.HasValue ? $"0x{arrayStoreHelperVA.Value:X}" : "not found")}");
 			return null;
 		}
@@ -514,65 +265,172 @@ internal static class StaticCtorResolver
 		return result;
 	}
 
-	private static Register Canon(Register r) => r switch
-	{
-		Register.RCX or Register.ECX or Register.CL => Register.RCX,
-		Register.RDX or Register.EDX or Register.DL => Register.RDX,
-		Register.R8 or Register.R8D or Register.R8W or Register.R8L => Register.R8,
-		Register.R9 or Register.R9D => Register.R9,
-		Register.RAX or Register.EAX or Register.AL or Register.AH => Register.RAX,
-		Register.RBX or Register.EBX or Register.BL or Register.BH => Register.RBX,
-		Register.RSI or Register.ESI or Register.SIL => Register.RSI,
-		Register.RDI or Register.EDI or Register.DIL => Register.RDI,
-		Register.RBP or Register.EBP or Register.BPL => Register.RBP,
-		Register.RSP or Register.ESP or Register.SPL => Register.RSP,
-		Register.R10 or Register.R10D => Register.R10,
-		Register.R11 or Register.R11D => Register.R11,
-		Register.R12 or Register.R12D => Register.R12,
-		Register.R13 or Register.R13D => Register.R13,
-		Register.R14 or Register.R14D => Register.R14,
-		Register.R15 or Register.R15D => Register.R15,
-		_ => r
-	};
+	private static bool IsPlausibleArrayLength(ulong? value) =>
+		value.HasValue && value.Value >= 1 && value.Value <= MaxTrackedArrayElements;
 
-	private static void ClearVolatileStrings(Dictionary<Register, string> regs, bool exceptRax = false)
+	private static string? ResolveString(ulong? value, IReadOnlyDictionary<ulong, string> stringByValue)
 	{
-		regs.Remove(Register.RCX);
-		regs.Remove(Register.RDX);
-		regs.Remove(Register.R8);
-		regs.Remove(Register.R9);
-		if (!exceptRax) regs.Remove(Register.RAX);
-		regs.Remove(Register.R10);
-		regs.Remove(Register.R11);
+		if (!value.HasValue)
+			return null;
+		return stringByValue.TryGetValue(value.Value, out var s) ? s : null;
 	}
 
-	private static bool TryBuildExactConcat(
-		SortedDictionary<int, string> chunks, int expectedCount, out string result)
+	private static bool TryBuildStringArguments(
+		string? rcx, string? rdx, string? r8, string? r9,
+		out string result, out int count)
 	{
 		result = string.Empty;
-		if (expectedCount <= 0 || chunks.Count != expectedCount)
+		count = 0;
+		if (rcx == null || rdx == null)
 			return false;
 
-		var sb = new System.Text.StringBuilder();
-		for (int i = 0; i < expectedCount; i++)
+		var sb = new System.Text.StringBuilder(rcx.Length + rdx.Length + (r8?.Length ?? 0) + (r9?.Length ?? 0));
+		sb.Append(rcx);
+		sb.Append(rdx);
+		count = 2;
+
+		if (r8 != null)
 		{
-			if (!chunks.TryGetValue(i, out var chunk))
-				return false;
-			sb.Append(chunk);
+			sb.Append(r8);
+			count = 3;
+			if (r9 != null)
+			{
+				sb.Append(r9);
+				count = 4;
+			}
 		}
 
 		result = sb.ToString();
 		return true;
 	}
 
-	private static ulong AllocateSyntheticArray(ref ulong nextBase, int elementCount)
+	private static ulong AllocateArray(
+		X64Emulator emulator,
+		ref ulong nextBase,
+		int elementCount,
+		ulong? klass)
 	{
 		ulong result = nextBase;
 		ulong bytes = 0x20UL + checked((ulong)elementCount * 8UL);
 		ulong alignedSpan = Math.Max(0x1000UL, (bytes + 0xFFFUL) & ~0xFFFUL);
 		nextBase = checked(nextBase + alignedSpan);
+
+		emulator.WriteMemory(result + 0x00, klass ?? 0, 8);
+		emulator.WriteMemory(result + 0x18, (ulong)elementCount, 4);
+		for (int i = 0; i < elementCount; i++)
+			emulator.WriteMemory(result + 0x20UL + (ulong)i * 8UL, 0, 8);
+
 		return result;
 	}
+
+	private static ulong AllocateSyntheticString(ref ulong nextValue)
+	{
+		ulong result = nextValue;
+		nextValue = checked(nextValue + 8);
+		return result;
+	}
+
+	private static ulong RegisterSyntheticString(
+		string value,
+		IDictionary<ulong, string> stringByValue,
+		ref ulong nextSyntheticString)
+	{
+		ulong pointer = AllocateSyntheticString(ref nextSyntheticString);
+		stringByValue[pointer] = value;
+		return pointer;
+	}
+
+	private static bool IsReferenceArrayStoreHelper(ulong targetVa)
+	{
+		if (targetVa < MainApp.baseAddress)
+			return false;
+
+		ulong rva64 = targetVa - MainApp.baseAddress;
+		if (rva64 > uint.MaxValue)
+			return false;
+
+		try
+		{
+			foreach (var instruction in InstructionParser.GetInstructions((uint)rva64, false))
+			{
+				if (instruction.Mnemonic == Mnemonic.Mov &&
+					instruction.Op0Kind == OpKind.Memory &&
+					instruction.Op1Kind == OpKind.Register &&
+					X64Emulator.Canonicalize(instruction.MemoryBase) == Register.RCX &&
+					X64Emulator.Canonicalize(instruction.MemoryIndex) == Register.RDX &&
+					instruction.MemoryIndexScale == 8 &&
+					instruction.MemoryDisplacement64 == 0x20 &&
+					X64Emulator.Canonicalize(instruction.Op1Register) == Register.R8)
+				{
+					return true;
+				}
+			}
+		}
+		catch
+		{
+			// wtf?
+		}
+
+		return false;
+	}
+
+	private static bool TryFinishArray(
+		X64Emulator emulator,
+		ulong? arrayBase,
+		int expectedCount,
+		IReadOnlyDictionary<ulong, string> stringByValue,
+		out string result,
+		out int resolvedCount)
+	{
+		result = string.Empty;
+		resolvedCount = 0;
+		if (!arrayBase.HasValue || expectedCount <= 0)
+			return false;
+
+		var sb = new System.Text.StringBuilder();
+		for (int i = 0; i < expectedCount; i++)
+		{
+			var element = emulator.ReadMemory(arrayBase.Value + 0x20UL + (ulong)i * 8UL, 8);
+			if (!element.HasValue || !stringByValue.TryGetValue(element.Value, out var chunk))
+				return false;
+
+			sb.Append(chunk);
+			resolvedCount++;
+		}
+
+		result = sb.ToString();
+		return true;
+	}
+
+	private static int CountResolvedArrayElements(
+		X64Emulator emulator,
+		ulong? arrayBase,
+		int expectedCount,
+		IReadOnlyDictionary<ulong, string> stringByValue)
+	{
+		if (!arrayBase.HasValue || expectedCount <= 0)
+			return 0;
+
+		int count = 0;
+		for (int i = 0; i < expectedCount; i++)
+		{
+			var element = emulator.ReadMemory(arrayBase.Value + 0x20UL + (ulong)i * 8UL, 8);
+			if (element.HasValue && stringByValue.ContainsKey(element.Value))
+				count++;
+		}
+		return count;
+	}
+
+	private static string FormatValue(ulong? value) => value?.ToString("X") ?? "?";
+
+	private static void PrintStringArg(string name, string? value)
+	{
+		if (value != null)
+			Console.Write($" {name}=\"{Preview(value)}\"");
+	}
+
+	private static string Preview(string value) =>
+		value[..Math.Min(20, value.Length)];
 
 	private static bool LooksLikeBase64(string s)
 	{
@@ -592,7 +450,8 @@ internal static class StaticCtorResolver
 		try
 		{
 			var bytes = Convert.FromBase64String(s);
-			if (bytes.Length < 3 || bytes[0] != 0x0a) return false;
+			if (bytes.Length < 3 || bytes[0] != 0x0A) return false;
+
 			int nameLen = 0;
 			int shift = 0;
 			int pos = 1;
@@ -603,11 +462,14 @@ internal static class StaticCtorResolver
 				if ((b & 0x80) == 0) break;
 				shift += 7;
 			}
+
 			if (nameLen <= 0 || pos + nameLen > bytes.Length) return false;
 			var name = System.Text.Encoding.UTF8.GetString(bytes, pos, nameLen);
 			return name.EndsWith(".proto", StringComparison.OrdinalIgnoreCase);
 		}
-		catch { return false; }
+		catch
+		{
+			return false;
+		}
 	}
-
 }

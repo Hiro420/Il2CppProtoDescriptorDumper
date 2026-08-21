@@ -48,6 +48,35 @@ internal sealed class X64Emulator
 			_syntheticMemory[address + (ulong)i] = (byte)(value >> (i * 8));
 	}
 
+	public ulong? ReadMemory(ulong address, int size = 8)
+	{
+		if (size is not (1 or 2 or 4 or 8))
+			throw new ArgumentOutOfRangeException(nameof(size), "Only 1, 2, 4 and 8-byte reads are supported.");
+
+		ulong value = 0;
+		bool hasSynthetic = true;
+		for (int i = 0; i < size; i++)
+		{
+			if (!_syntheticMemory.TryGetValue(address + (ulong)i, out var b))
+			{
+				hasSynthetic = false;
+				break;
+			}
+			value |= (ulong)b << (i * 8);
+		}
+		if (hasSynthetic)
+			return value;
+
+		if (!TryVaToOffset(address, out var offset) || offset + (ulong)size > (ulong)_moduleBytes.Length)
+			return null;
+
+		value = 0;
+		for (int i = 0; i < size; i++)
+			value |= (ulong)_moduleBytes[(int)(offset + (ulong)i)] << (i * 8);
+
+		return value;
+	}
+
 	private void Clear(Register reg)
 	{
 		reg = Canonicalize(reg);
